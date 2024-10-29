@@ -267,23 +267,38 @@
 
                 async detectSilence(file) {
                     const data = await file.arrayBuffer();
-                    await ffmpeg.writeFile('input.mp4', new Uint8Array(data));
-
-                    await ffmpeg.exec([
-                        '-i', 'input.mp4',
-                        '-af', 'silencedetect=noise=-40dB:d=0.1',
-                        '-f', 'null',
-                        '-'
-                    ]);
-
-                    const output = await ffmpeg.readFile('input.mp4_silencedetect');
-                    this.blocks = this.parseSilenceDetection(output);
+                    let silenceLog = '';
+                    
+                    // Set up log handler before processing
+                    const logHandler = ({ message }) => {
+                        if (message.includes('silencedetect')) {
+                            silenceLog += message + '\n';
+                        }
+                    };
+                    
+                    ffmpeg.on('log', logHandler);
+                    
+                    try {
+                        await ffmpeg.writeFile('input.mp4', new Uint8Array(data));
+                        
+                        await ffmpeg.exec([
+                            '-i', 'input.mp4',
+                            '-af', 'silencedetect=noise=-40dB:d=0.1',
+                            '-f', 'null',
+                            '-'
+                        ]);
+                        
+                        this.blocks = this.parseSilenceDetection(silenceLog);
+                    } finally {
+                        // Clean up log handler
+                        ffmpeg.off('log', logHandler);
+                    }
                 },
 
                 parseSilenceDetection(output) {
                     const silenceStarts = [];
                     const silenceEnds = [];
-                    const lines = output.toString().split('\n');
+                    const lines = output.split('\n');
 
                     lines.forEach(line => {
                         if (line.includes('silence_start')) {
