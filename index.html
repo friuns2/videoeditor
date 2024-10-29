@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Block Editor</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@3.9.4/dist/full.css" rel="stylesheet">
+    <script src="/assets/ffmpeg/package/dist/umd/ffmpeg.js"></script>
+    <script src="/assets/util/package/dist/umd/index.js"></script>
+</head>
+<body>
+    <div id="app">
+        <div class="container mx-auto p-4">
+            <!-- Header -->
+            <div class="navbar bg-base-100 rounded-box shadow-lg mb-4">
+                <div class="flex-1">
+                    <h1 class="text-xl font-bold px-4">Video Block Editor</h1>
+                </div>
+                <div class="flex-none">
+                    <button class="btn btn-ghost" @click="showHelp">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Main Content -->
+            <div class="grid grid-cols-1 gap-4">
+                <!-- Video Player -->
+                <div class="bg-base-200 rounded-box p-4">
+                    <video 
+                        ref="videoPlayer"
+                        class="w-full aspect-video bg-black rounded-lg"
+                        @timeupdate="onTimeUpdate"
+                        @loadedmetadata="onVideoLoaded"
+                        @durationchange="onDurationChange"
+                    ></video>
+
+                    <!-- Timeline -->
+                    <div class="mt-4">
+                        <canvas 
+                            ref="timelineCanvas" 
+                            class="w-full h-16 bg-base-300 rounded-lg"
+                            @click="seekToPosition"
+                        ></canvas>
+                        <input 
+                            type="range" 
+                            class="range range-primary w-full mt-2" 
+                            :min="0"
+                            :max="duration"
+                            :value="currentTime"
+                            @input="seek"
+                        >
+                    </div>
+
+                    <!-- Controls -->
+                    <div class="flex flex-wrap gap-2 mt-4">
+                        <div class="btn-group">
+                            <button class="btn" @click="playPause">
+                                {{ isPlaying ? 'Pause' : 'Play' }}
+                            </button>
+                            <button class="btn" @click="previousBlock" :disabled="!blocks.length">
+                                Previous
+                            </button>
+                            <button class="btn" @click="nextBlock" :disabled="!blocks.length">
+                                Next
+                            </button>
+                        </div>
+
+                        <div class="btn-group">
+                            <button 
+                                class="btn" 
+                                :class="{'btn-success': greenMode, 'btn-error': !greenMode}"
+                                @click="toggleMode"
+                            >
+                                {{ greenMode ? 'Include Mode' : 'Exclude Mode' }}
+                            </button>
+                            <button class="btn" @click="resetBlocks" :disabled="!blocks.length">
+                                Reset
+                            </button>
+                        </div>
+
+                        <div class="btn-group">
+                            <button class="btn" @click="zoomIn">
+                                Zoom In
+                            </button>
+                            <button class="btn" @click="zoomOut">
+                                Zoom Out
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- File Operations -->
+                <div class="bg-base-200 rounded-box p-4">
+                    <div class="flex flex-wrap gap-2">
+                        <input 
+                            type="file" 
+                            class="file-input file-input-bordered w-full max-w-xs"
+                            accept="video/*"
+                            @change="onFileSelect"
+                        >
+                        <button 
+                            class="btn btn-primary" 
+                            @click="exportVideo"
+                            :disabled="!hasIncludedBlocks"
+                        >
+                            Export
+                        </button>
+                        <button 
+                            class="btn" 
+                            @click="saveState"
+                            :disabled="!blocks.length"
+                        >
+                            Save State
+                        </button>
+                        <button 
+                            class="btn" 
+                            @click="loadState"
+                        >
+                            Load State
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Progress -->
+                <div v-if="processing" class="bg-base-200 rounded-box p-4">
+                    <progress class="progress w-full" :value="progress" max="100"></progress>
+                    <div class="text-center mt-2">{{ processingMessage }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Help Modal -->
+        <dialog ref="helpModal" class="modal">
+            <div class="modal-box">
+                <h3 class="font-bold text-lg">Keyboard Shortcuts</h3>
+                <div class="py-4">
+                    <ul class="list-disc list-inside">
+                        <li>Space: Play/Pause</li>
+                        <li>Left Arrow: Previous Block</li>
+                        <li>Right Arrow: Next Block</li>
+                        <li>T: Toggle Mode</li>
+                        <li>+: Zoom In</li>
+                        <li>-: Zoom Out</li>
+                    </ul>
+                </div>
+                <div class="modal-action">
+                    <form method="dialog">
+                        <button class="btn">Close</button>
+                    </form>
+                </div>
+            </div>
+        </dialog>
+    </div>
+
+    <script>
+        const { fetchFile, toBlobURL } = FFmpegUtil;
+        const { FFmpeg } = FFmpegWASM;
+
+        // Create FFmpeg instance
+        const ffmpeg = new FFmpeg();
+
+        new Vue({
+            el: '#app',
+            data() {
+                return {
+                    blocks: [],
+                    currentTime: 0,
+                    duration: 0,
+                    isPlaying: false,
+                    greenMode: true,
+                    processing: false,
+                    progress: 0,
+                    processingMessage: '',
+                    visibleBlocks: 200,
+                    currentBlockIndex: 0,
+                    skipTimer: null
+                }
+            },
+
+            computed: {
+                hasIncludedBlocks() {
+                    return this.blocks.some(block => !block.isSilence && block.visited && block.include);
+                }
+            },
+
+            async mounted() {
+                try {
+                    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                    await ffmpeg.load({
+                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                    });
+                    
+                    ffmpeg.on('log', ({ message }) => {
+                        console.log(message);
+                    });
+                    
+                    ffmpeg.on('progress', ({ progress }) => {
+                        this.progress = progress * 100;
+                        this.processingMessage = `Processing: ${Math.round(progress * 100)}%`;
+                    });
+
+                } catch (error) {
+                    console.error('Failed to load FFmpeg:', error);
+                }
+
+                // Set up keyboard shortcuts
+                document.addEventListener('keydown', this.handleKeyPress);
+            },
+
+            beforeDestroy() {
+                document.removeEventListener('keydown', this.handleKeyPress);
+                if (this.skipTimer) {
+                    clearInterval(this.skipTimer);
+                }
+            },
+
+            methods: {
+                handleKeyPress(e) {
+                    switch(e.key) {
+                        case ' ':
+                            e.preventDefault();
+                            this.playPause();
+                            break;
+                        case 'ArrowLeft':
+                            e.preventDefault();
+                            this.previousBlock();
+                            break;
+                        case 'ArrowRight':
+                            e.preventDefault();
+                            this.nextBlock();
+                            break;
+                        case 't':
+                        case 'T':
+                            this.toggleMode();
+                            break;
+                        case '+':
+                            this.zoomIn();
+                            break;
+                        case '-':
+                            this.zoomOut();
+                            break;
+                    }
+                },
+
+                async onFileSelect(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    const url = URL.createObjectURL(file);
+                    this.$refs.videoPlayer.src = url;
+                    
+                    this.processing = true;
+                    this.processingMessage = 'Processing video...';
+                    
+                    try {
+                        await this.detectSilence(file);
+                    } finally {
+                        this.processing = false;
+                    }
+                },
+
+                async detectSilence(file) {
+                    const data = await file.arrayBuffer();
+                    await ffmpeg.writeFile('input.mp4', new Uint8Array(data));
+
+                    await ffmpeg.exec([
+                        '-i', 'input.mp4',
+                        '-af', 'silencedetect=noise=-40dB:d=0.1',
+                        '-f', 'null',
+                        '-'
+                    ]);
+
+                    const output = await ffmpeg.readFile('input.mp4_silencedetect');
+                    this.blocks = this.parseSilenceDetection(output);
+                },
+
+                parseSilenceDetection(output) {
+                    const silenceStarts = [];
+                    const silenceEnds = [];
+                    const lines = output.toString().split('\n');
+
+                    lines.forEach(line => {
+                        if (line.includes('silence_start')) {
+                            const time = parseFloat(line.split('silence_start: ')[1]);
+                            silenceStarts.push(time);
+                        } else if (line.includes('silence_end')) {
+                            const time = parseFloat(line.split('silence_end: ')[1]);
+                            silenceEnds.push(time);
+                        }
+                    });
+
+                    const blocks = [];
+                    let currentTime = 0;
+
+                    silenceStarts.forEach((start, i) => {
+                        if (start > currentTime) {
+                            blocks.push({
+                                start: currentTime,
+                                end: start,
+                                isSilence: false,
+                                visited: false,
+                                include: true
+                            });
+                        }
+                        blocks.push({
+                            start: start,
+                            end: silenceEnds[i],
+                            isSilence: true,
+                            visited: false,
+                            include: false
+                        });
+                        currentTime = silenceEnds[i];
+                    });
+
+                    if (currentTime < this.duration) {
+                        blocks.push({
+                            start: currentTime,
+                            end: this.duration,
+                            isSilence: false,
+                            visited: false,
+                            include: true
+                        });
+                    }
+
+                    return blocks;
+                },
+
+                playPause() {
+                    if (this.$refs.videoPlayer.paused) {
+                        this.$refs.videoPlayer.play();
+                        this.isPlaying = true;
+                        this.skipTimer = setInterval(this.skipSilence, 100);
+                    } else {
+                        this.$refs.videoPlayer.pause();
+                        this.isPlaying = false;
+                        if (this.skipTimer) {
+                            clearInterval(this.skipTimer);
+                        }
+                    }
+                },
+
+                skipSilence() {
+                    if (!this.blocks.length) return;
+
+                    const currentTime = this.$refs.videoPlayer.currentTime;
+                    const currentBlock = this.blocks[this.currentBlockIndex];
+
+                    if (!currentBlock) return;
+
+                    if (currentBlock.isSilence || 
+                        (!currentBlock.isSilence && currentBlock.end - currentBlock.start < 0.2)) {
+                        const nextIndex = this.findNextNonSilenceBlock(this.currentBlockIndex);
+                        if (nextIndex !== null) {
+                            this.currentBlockIndex = nextIndex;
+                            const nextBlock = this.blocks[nextIndex];
+                            this.$refs.videoPlayer.currentTime = nextBlock.start + 0.05;
+                        } else {
+                            this.$refs.videoPlayer.pause();
+                            this.isPlaying = false;
+                        }
+                    }
+                },
+
+                findNextNonSilenceBlock(startIndex, forward = true) {
+                    if (forward) {
+                        for (let i = startIndex + 1; i < this.blocks.length; i++) {
+                            if (!this.blocks[i].isSilence) {
+                                return i;
+                            }
+                        }
+                    } else {
+                        for (let i = startIndex - 1; i >= 0; i--) {
+                            if (!this.blocks[i].isSilence) {
+                                return i;
+                            }
+                        }
+                    }
+                    return null;
+                },
+
+                previousBlock() {
+                    const nextIndex = this.findNextNonSilenceBlock(this.currentBlockIndex, false);
+                    if (nextIndex !== null) {
+                        const wasPlaying = !this.$refs.videoPlayer.paused;
+                        this.currentBlockIndex = nextIndex;
+                        this.$refs.videoPlayer.currentTime = this.blocks[nextIndex].start;
+                        if (wasPlaying) {
+                            this.$refs.videoPlayer.play();
+                        }
+                    }
+                },
+
+                nextBlock() {
+                    const nextIndex = this.findNextNonSilenceBlock(this.currentBlockIndex, true);
+                    if (nextIndex !== null) {
+                        const wasPlaying = !this.$refs.videoPlayer.paused;
+                        this.currentBlockIndex = nextIndex;
+                        this.$refs.videoPlayer.currentTime = this.blocks[nextIndex].start;
+                        if (wasPlaying) {
+                            this.$refs.videoPlayer.play();
+                        }
+                    }
+                },
+
+                toggleMode() {
+                    this.greenMode = !this.greenMode;
+                },
+
+                resetBlocks() {
+                    this.blocks.forEach(block => {
+                        block.visited = false;
+                        block.include = !block.isSilence;
+                    });
+                },
+
+                zoomIn() {
+                    this.visibleBlocks = Math.max(1, this.visibleBlocks - 1);
+                },
+
+                zoomOut() {
+                    this.visibleBlocks = Math.min(this.blocks.length, this.visibleBlocks + 1);
+                },
+
+                onTimeUpdate() {
+                    this.currentTime = this.$refs.videoPlayer.currentTime;
+                    this.updateCurrentBlock();
+                    this.drawTimeline();
+                },
+
+                onVideoLoaded() {
+                    this.duration = this.$refs.videoPlayer.duration;
+                },
+
+                onDurationChange() {
+                    this.duration = this.$refs.videoPlayer.duration;
+                },
+
+                updateCurrentBlock() {
+                    const time = this.currentTime;
+                    const index = this.blocks.findIndex(block => 
+                        block.start <= time && time <= block.end
+                    );
+                    
+                    if (index !== -1) {
+                        this.currentBlockIndex = index;
+                        const block = this.blocks[index];
+                        if (!block.isSilence) {
+                            block.visited = true;
+                            block.include = this.greenMode;
+                        }
+                    }
+                },
+
+                drawTimeline() {
+                    const canvas = this.$refs.timelineCanvas;
+                    const ctx = canvas.getContext('2d');
+                    const width = canvas.width;
+                    const height = canvas.height;
+
+                    ctx.clearRect(0, 0, width, height);
+
+                    this.blocks.forEach(block => {
+                        const x = (block.start / this.duration) * width;
+                        const w = ((block.end - block.start) / this.duration) * width;
+                        
+                        if (block.isSilence) {
+                            ctx.fillStyle = 'gray';
+                        } else if (block.visited) {
+                            ctx.fillStyle = block.include ? 'green' : 'red';
+                        } else {
+                            ctx.fillStyle = 'blue';
+                        }
+                        
+                        ctx.fillRect(x, 0, w, height);
+                    });
+
+                    const playheadX = (this.currentTime / this.duration) * width;
+                    ctx.fillStyle = 'white';
+                    ctx.fillRect(playheadX - 1, 0, 2, height);
+                },
+
+                seekToPosition(event) {
+                    const canvas = this.$refs.timelineCanvas;
+                    const rect = canvas.getBoundingClientRect();
+                    const x = event.clientX - rect.left;
+                    const time = (x / canvas.width) * this.duration;
+                    this.$refs.videoPlayer.currentTime = time;
+                },
+
+                seek(event) {
+                    this.$refs.videoPlayer.currentTime = event.target.value;
+                },
+
+                showHelp() {
+                    this.$refs.helpModal.showModal();
+                },
+
+                async loadState() {
+                    const [fileHandle] = await window.showOpenFilePicker({
+                        types: [{
+                            description: 'JSON Files',
+                            accept: {'application/json': ['.json']}
+                        }]
+                    });
+                    
+                    const file = await fileHandle.getFile();
+                    const state = JSON.parse(await file.text());
+                    
+                    this.$refs.videoPlayer.src = state.videoPath;
+                    
+                    this.blocks = state.blocks.map(block => ({
+                        start: block.start,
+                        end: block.end,
+                        isSilence: block.is_silence,
+                        visited: block.visited,
+                        include: block.include
+                    }));
+                },
+
+                async saveState() {
+                    if (!this.blocks.length) {
+                        alert("No blocks to save!");
+                        return;
+                    }
+
+                    const state = {
+                        videoPath: this.$refs.videoPlayer.src,
+                        blocks: this.blocks.map(block => ({
+                            start: block.start,
+                            end: block.end,
+                            is_silence: block.isSilence,
+                            visited: block.visited,
+                            include: block.include
+                        }))
+                    };
+
+                    const blob = new Blob([JSON.stringify(state)], { type: 'application/json' });
+                    const handle = await window.showSaveFilePicker({
+                        types: [{
+                            description: 'JSON Files',
+                            accept: {'application/json': ['.json']}
+                        }]
+                    });
+                    
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                },
+
+                async exportVideo() {
+                    if (!this.blocks.some(block => !block.isSilence && block.visited && block.include)) {
+                        alert("No blocks selected for export!");
+                        return;
+                    }
+
+                    this.processing = true;
+                    this.processingMessage = "Preparing for export...";
+                    
+                    try {
+                        const includedBlocks = this.blocks.filter(
+                            block => !block.isSilence && block.visited && block.include
+                        );
+
+                        const inputVideo = await fetchFile(this.$refs.videoPlayer.src);
+                        await ffmpeg.writeFile('input.mp4', inputVideo);
+
+                        let segmentsList = '';
+                        for (let i = 0; i < includedBlocks.length; i++) {
+                            const block = includedBlocks[i];
+                            const duration = Math.max(0.1, block.end - block.start);
+                            
+                            await ffmpeg.exec([
+                                '-ss', block.start.toFixed(3),
+                                '-t', duration.toFixed(3),
+                                '-i', 'input.mp4',
+                                '-c', 'copy',
+                                '-avoid_negative_ts', 'make_zero',
+                                `segment_${i}.mp4`
+                            ]);
+                            
+                            segmentsList += `file segment_${i}.mp4\n`;
+                        }
+
+                        await ffmpeg.writeFile('segments.txt', segmentsList);
+
+                        await ffmpeg.exec([
+                            '-f', 'concat',
+                            '-safe', '0',
+                            '-i', 'segments.txt',
+                            '-c', 'copy',
+                            'output.mp4'
+                        ]);
+
+                        const data = await ffmpeg.readFile('output.mp4');
+                        
+                        const blob = new Blob([data], { type: 'video/mp4' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'exported_video.mp4';
+                        a.click();
+                        URL.revokeObjectURL(url);
+
+                    } catch (error) {
+                        console.error('Export error:', error);
+                        alert('Error during export: ' + error.message);
+                    } finally {
+                        this.processing = false;
+                        this.processingMessage = '';
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
