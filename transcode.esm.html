@@ -22,8 +22,10 @@
           ffmpeg.on("progress", ({ progress }) => {
             message.innerHTML = `${progress * 100} %`;
           });
+          const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
           await ffmpeg.load({
-            coreURL: "/assets/core/package/dist/esm/ffmpeg-core.js",
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
           });
         }
         const { name } = files[0];

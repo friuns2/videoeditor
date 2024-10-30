@@ -25,8 +25,10 @@
           ffmpeg.on("progress", ({ progress, time }) => {
 	    message.innerHTML = `${time / 1000000} s`;
           });
+          const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
           await ffmpeg.load({
-            coreURL: "/assets/core/package/dist/umd/ffmpeg-core.js",
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
           });
         }
         message.innerHTML = "Start Concating";

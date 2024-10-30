@@ -1,10 +1,12 @@
 {
-  "name": "browser",
+  "name": "video-editor",
   "version": "0.12.0-alpha.0",
-  "description": "browser example",
+  "description": "Video Block Editor",
   "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "wrangler pages dev .",
+    "deploy": "wrangler pages deploy ."
   },
   "author": "Jerome Wu <jeromewus@gmail.com>",
   "license": "MIT",
@@ -12,5 +14,8 @@
     "express": "^4.21.1",
     "serve-index": "^1.9.1",
     "tar": "^6.1.15"
+  },
+  "devDependencies": {
+    "wrangler": "^3.28.1"
   }
 }
